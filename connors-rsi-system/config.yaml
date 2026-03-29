@@ -1,0 +1,62 @@
+# ConnorsRSI(2) 自動監視システム — 設定
+strategy:
+  crsi_buy_threshold: 10
+  crsi_exit_threshold: 70
+  ma_period: 200
+  volume_lookback: 20
+  volume_multiplier: 1.5
+  min_price_usd: 5.0
+  min_market_cap_usd: 500_000_000
+  max_hold_days: 5
+
+exit:
+  stop_loss_pct: -0.08
+  atr_period: 2
+  atr_multiplier: 2.0
+  min_target_pct: 0.02
+  max_target_pct: 0.08
+  partial_exit_ratio: 0.50
+  rally_alert_pcts: [0.02, 0.03, 0.04]
+  volatility_atr_multiple: 2.0
+  # 保有中に更新する「高値」から ○％下落したら全株成行（100株単位向け）。0 で無効
+  trail_from_peak_pct: 0.05
+  # ボラ部分利確（50%売り）は 100 株では通常使わないためデフォルト無効
+  enable_volatility_partial: false
+
+monitor:
+  price_check_interval_sec: 5
+  market_open: "09:30"
+  pre_close_exit: "15:55"
+  timezone: "America/New_York"
+
+database:
+  path: "data/watchlist.db"
+
+alerts:
+  line_token: ""
+  slack_webhook: ""
+
+screener:
+  tradingview_screener_url: "https://www.tradingview.com/screener/"
+  run_weekday: 0
+  run_hour: 10
+  run_minute: 0
+
+alpaca:
+  api_key: ""
+  api_secret: ""
+  paper: true
+
+# 株価ソース: excel = MarketSpeed の Excel 記帳など（保存された .xlsx をポーリング）
+#            yfinance = 米株など遅延データ（デフォルト）
+market_data:
+  source: yfinance
+  # 例: "C:/Users/あなた/Documents/MarketSpeed/prices.xlsx"
+  # 相対パスは config.yaml があるフォルダ、またはプロジェクト直下からの相対でも可
+  excel_path: ""
+  sheet: 0
+  symbol_column: ""
+  price_column: ""
+  prev_close_column: ""
+  currency_hint: JPY
+  stale_warn_sec: 120

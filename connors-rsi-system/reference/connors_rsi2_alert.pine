@@ -1,0 +1,12 @@
+//@version=5
+indicator("ConnorsRSI(2) Monitor", overlay = false)
+rsi2 = ta.rsi(close, 2)
+var float streak = 0.0
+streak := close > close[1] ? (streak[1] > 0 ? streak[1] + 1 : 1) : close < close[1] ? (streak[1] < 0 ? streak[1] - 1 : -1) : 0
+streakRSI = ta.rsi(streak, 2)
+prank = ta.percentrank(ta.roc(close, 1), 100)
+crsi = (rsi2 + streakRSI + prank) / 3
+buySignal = crsi < 10 and close > ta.sma(close, 200)
+exitSignal = crsi > 70
+alertcondition(buySignal, "BUY", "ConnorsRSI BUY: {{ticker}} @ {{close}}")
+alertcondition(exitSignal, "EXIT", "ConnorsRSI EXIT: {{ticker}} @ {{close}}")

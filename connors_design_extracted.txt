@@ -1,0 +1,500 @@
+ConnorsRSI(2) 自動監視システム
+設計書 v1.0  ―  日中最高値キャプチャー対応版
+1. プロジェクト概要
+1.1 課題と目的
+現状の ConnorsRSI(2) 運用では「終値での売却」のみを行っているため、日中に発生する一時的な高値（スパイク）を取りこぼすケースが多発している。本システムは以下を実現する。
+従来の課題
+本システムで解決
+終値売りのみ → 日中高値を取りこぼす
+リアルタイム価格監視で日中ピークを捕捉
+手動でTradingViewをチェック
+月曜スクリーニング → 自動ウォッチリスト登録
+売りタイミングが感覚的
+RSIベースの出口アルゴリズムで規律ある決済
+複数銘柄の同時管理が困難
+ダッシュボードで一元管理・アラート通知
+1.2 システム全体像
+アーキテクチャ概要
+[ TradingView ]  →  [ スクリーナーモジュール ]  →  [ ウォッチリストDB ]
+↓
+[ 価格フィード API ]  →  [ リアルタイム監視エンジン ]  →  [ 出口判定ロジック ]
+↓
+[ 通知エンジン ]  →  [ ダッシュボード UI ]  →  [ トレード履歴 ]
+2. ConnorsRSI(2) 戦略ロジック
+2.1 指標定義
+ConnorsRSI は Laurence Connors が開発した複合 RSI 指標。本戦略では期間 2 を使用。
+コンポーネント
+パラメータ
+説明
+RSI
+期間 = 2
+短期 RSI（2日）で過売・過買を計測
+StreakRSI
+連勝/連敗 RSI
+連続上昇または下落日数に対する RSI
+PercentRank
+期間 = 100
+直近100日の騰落率のパーセンタイル順位
+ConnorsRSI
+= 平均(3値)
+上記3指標の単純平均
+// ConnorsRSI 計算式
+ConnorsRSI(2) = ( RSI(2) + RSI(Streak, 2) + PercentRank(100) ) / 3
+// エントリー条件
+BUY  : ConnorsRSI(2) < 10  AND  Price > 200DMA  AND  Volume > 平均出来高
+// 出口条件（本システムで拡張）
+EXIT : ConnorsRSI(2) > 70  OR  Intraday High Target Hit  OR  Stop Loss
+2.2 エントリーシグナル（月曜スクリーニング）
+ConnorsRSI(2) < 10（強い過売り状態）
+終値 > 200日移動平均（上昇トレンド銘柄のみ）
+当日出来高 > 20日平均出来高の 1.5 倍（流動性確保）
+株価 $5 以上・時価総額 $500M 以上（低流動性除外）
+TradingView スクリーナーで毎週月曜 10:00 自動実行
+2.3 出口戦略アルゴリズム（本システムの核心）
+従来の「終値売り」を廃止し、以下の階層型出口戦略を採用する。
+優先
+トリガー種別
+条件
+アクション
+1位
+損切り（必須）
+終値 < エントリー価格 × 0.92  OR  終値が 200日移動平均を下抜け
+即時成行売り / 損失限定
+2位
+RSI過買い出口
+ConnorsRSI > 70
+翌日始値で売り（引け売り可）※ 手動判断推奨
+3位
+価格上昇アラート（手動判断）
+当日騰落率 >= +2% / +3% / +4%
+LINE/Slack 通知のみ → ユーザーが売り判断
+4位
+日中高値ターゲット
+当日高値 ≥ エントリー×目標倍率
+指値注文で自動利確
+5位
+ボラティリティ出口
+ATR(2) > 通常の 2 倍 + RSI > 50
+部分利確（50%）
+6位
+タイムアウト出口
+保有 5 営業日経過
+強制クローズ（機会費用管理）
+2.3.1 日中高値キャプチャーアルゴリズム
+目的
+エントリー後の初動上昇を最大限に取得する。終値を待たず、日中の価格スパイクで利確する。
+// 動的ターゲット計算
+base_target  = entry_price * (1 + target_pct)
+target_pct   = clamp(atr_pct * multiplier, min_pct, max_pct)
+// デフォルトパラメータ
+atr_period   = 2          // ATR期間
+multiplier   = 2.0        // ATR倍率
+min_pct      = 0.02       // 最小目標: +2%
+max_pct      = 0.08       // 最大目標: +8%
+// 監視ループ（5秒間隔）
+while position_open:
+current_price = get_realtime_price(symbol)
+if current_price >= base_target:
+execute_limit_sell(symbol, current_price)
+send_alert('TARGET HIT', symbol, current_price)
+3. システムアーキテクチャ詳細
+3.1 モジュール構成
+モジュール名
+技術スタック
+責務
+Screener Module
+Python + Playwright
+TradingView操作・銘柄抽出
+Watchlist Manager
+SQLite / PostgreSQL
+監視銘柄DB・ポジション管理
+Price Feed Engine
+WebSocket (Alpaca/Polygon)
+リアルタイム価格受信
+Exit Logic Engine
+Python asyncio
+出口条件判定・注文生成
+Order Manager
+Alpaca API / IB API
+発注・約定管理
+Alert Engine
+LINE / Slack Webhook
+プッシュ通知送信
+Dashboard UI
+Next.js + Tailwind
+リアルタイムダッシュボード
+History Analyzer
+pandas + SQLite
+トレード結果分析・レポート
+3.2 ディレクトリ構成
+connors-rsi-system/
+├── screener/
+│   ├── tradingview_scraper.py   # TradingView 自動スクリーニング
+│   ├── signal_filter.py         # エントリー条件フィルター
+│   └── scheduler.py             # 月曜朝 スケジューラー
+├── watchlist/
+│   ├── db.py                    # SQLite/PostgreSQL ラッパー
+│   ├── position_manager.py      # ポジション状態管理
+│   └── models.py                # データモデル定義
+├── monitor/
+│   ├── price_feed.py            # WebSocket 価格受信
+│   ├── exit_engine.py           # 出口ロジック判定エンジン
+│   └── order_manager.py         # 発注・約定ハンドラー
+├── alerts/
+│   ├── notifier.py              # LINE/Slack 通知
+│   └── templates.py             # メッセージテンプレート
+├── dashboard/                   # Next.js フロントエンド
+│   ├── pages/
+│   └── components/
+├── analysis/
+│   ├── backtest.py              # バックテストエンジン
+│   └── report_generator.py      # 週次レポート生成
+├── config.yaml                  # 全パラメータ設定
+└── main.py                      # エントリーポイント
+3.3 データモデル
+3.3.1 Watchlist テーブル
+CREATE TABLE watchlist (
+id              INTEGER PRIMARY KEY AUTOINCREMENT,
+symbol          TEXT NOT NULL,
+screened_date   DATE NOT NULL,          -- スクリーニング日（月曜）
+entry_price     REAL,                   -- エントリー価格
+entry_date      DATE,                   -- エントリー日
+shares          INTEGER,                -- 保有株数
+target_price    REAL,                   -- 日中目標価格
+stop_price      REAL,                   -- ストップロス価格
+crsi_at_entry   REAL,                   -- エントリー時 ConnorsRSI
+status          TEXT DEFAULT 'WATCHING', -- WATCHING/HOLDING/CLOSED
+exit_price      REAL,                   -- 決済価格
+exit_reason     TEXT,                   -- 決済理由
+pnl             REAL,                   -- 損益
+created_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+4. 実装フロー
+4.1 週次ワークフロー
+タイミング
+処理
+詳細
+月曜 10:00
+スクリーナー起動
+TradingView を Playwright で自動操作・ConnorsRSI < 10 銘柄を抽出
+月曜 10:05
+ウォッチリスト登録
+抽出銘柄を DB 登録・目標価格・ストップ価格を自動計算
+月曜 10:10
+市場オープン
+監視エンジン起動・WebSocket 価格受信開始
+平日 日中
+リアルタイム監視
+5秒毎に価格チェック・出口条件を随時判定
+日中随時
+利確シグナル
+目標価格到達 → 指値注文 → LINE/Slack アラート送信
+15:55
+RSI 終値チェック
+引け前に ConnorsRSI > 70 判定 → 引け成行売り
+16:00
+デイリーレポート
+当日 P&L・保有状況・翌日注意銘柄をまとめて通知
+週末
+週次分析
+週間成績・戦略パラメータの最適化レポート生成
+4.2 監視エンジン 詳細フロー
+処理間隔
+リアルタイム価格受信は WebSocket（遅延 < 100ms）。出口判定ループは asyncio で並列処理（5秒間隔）。
+async def monitor_loop(watchlist: List[Position]):
+async with price_feed.connect() as feed:
+await feed.subscribe([p.symbol for p in watchlist])
+async for tick in feed:
+position = find_position(tick.symbol)
+if not position: continue
+# Priority 1: Stop Loss
+if tick.price <= position.stop_price:
+await order_manager.market_sell(position, 'STOP_LOSS')
+await notifier.alert(' 損切り', position, tick.price)
+# Priority 2: Intraday Target
+elif tick.price >= position.target_price:
+await order_manager.limit_sell(position, tick.price, 'TARGET_HIT')
+await notifier.alert(' 目標到達', position, tick.price)
+# Priority 3: Volatility Exit (partial)
+elif is_high_volatility(position) and tick.rsi > 50:
+await order_manager.partial_sell(position, 0.5, 'VOLATILITY')
+await notifier.alert(' 部分利確', position, tick.price)
+5. TradingView スクリーナー連携
+5.1 自動スクリーニング実装
+Playwright（Headless Chrome）を使用して TradingView の Stock Screener を月曜朝に自動実行する。
+# tradingview_scraper.py
+from playwright.async_api import async_playwright
+async def run_screener():
+async with async_playwright() as p:
+browser = await p.chromium.launch(headless=True)
+page = await browser.new_page()
+await page.goto('https://www.tradingview.com/screener/')
+# ConnorsRSI(2) < 10 フィルターを適用
+await page.click('[data-name="add-filter"]')
+await page.fill('[placeholder="Search"]', 'ConnorsRSI')
+await page.click('text=ConnorsRSI(2)')
+await page.fill('[data-field="less_than"]', '10')
+# 追加フィルター: 200DMA以上、出来高条件
+await apply_additional_filters(page)
+# 結果を取得
+symbols = await page.query_selector_all('.tv-screener-table__symbol')
+return [await s.inner_text() for s in symbols]
+5.2 TradingView Pine Script アラート設定
+TradingView 側でも補完的にアラートを設定することで、スクリーナー間の空白時間をカバーする。
+// Pine Script v5 - ConnorsRSI(2) Alert
+//@version=5
+indicator('ConnorsRSI(2) Monitor', overlay=false)
+// ConnorsRSI計算
+rsi2 = ta.rsi(close, 2)
+streak = 0.0
+streak := close > close[1] ? (streak[1] > 0 ? streak[1] + 1 : 1) :
+close < close[1] ? (streak[1] < 0 ? streak[1] - 1 : -1) : 0
+streakRSI = ta.rsi(streak, 2)
+prank = ta.percentrank(ta.roc(close, 1), 100)
+crsi = (rsi2 + streakRSI + prank) / 3
+// アラート条件
+buySignal  = crsi < 10 and close > ta.sma(close, 200)
+exitSignal = crsi > 70
+alertcondition(buySignal,  'BUY',  'ConnorsRSI BUY: {{ticker}} @ {{close}}')
+alertcondition(exitSignal, 'EXIT', 'ConnorsRSI EXIT: {{ticker}} @ {{close}}')
+6. ダッシュボード仕様
+6.1 画面構成
+画面/コンポーネント
+表示内容
+ヘッダー
+接続状態・現在時刻・市場ステータス（オープン/クローズ）
+サマリーカード
+本日 P&L / 勝率 / 保有銘柄数 / 合計エクスポージャー
+ウォッチリスト
+銘柄・現在値・目標価格・ストップ価格・ConnorsRSI・損益
+価格チャート
+選択銘柄のローソク足 + RSI(2) + 目標/ストップライン
+アラートログ
+直近のシグナル履歴（エントリー・利確・損切り）
+週次レポート
+週間 P&L グラフ・出口理由内訳・期待値分析
+6.2 リアルタイム更新仕様
+価格データ: WebSocket で 1 秒毎更新
+ConnorsRSI 値: 5 秒毎再計算・表示
+P&L: ポジション変化時即時更新
+アラートログ: イベント発生時即時プッシュ
+7. アラート・通知仕様
+7.1 通知チャンネル
+チャンネル
+タイミング
+内容
+LINE Notify
+即時（重要）
+損切り・目標到達・RSI出口シグナル
+Slack
+即時（全て）
+全シグナル + デイリーサマリー
+メール
+日次
+当日トレードレポート（詳細版）
+ダッシュボード
+リアルタイム
+全状態のリアルタイム表示
+7.2 通知メッセージ例
+目標到達
+AAPL @ $185.40（+4.2%）  目標: $184.80 到達
+ConnorsRSI: 12 → 55  /  利益: +$840  /  保有: 2日
+損切り
+NVDA @ $430.20（-8.0%）  ストップ: $432.00 割れ
+ポジションクローズ  /  損失: -$1,200
+8. 実装ロードマップ
+Phase
+期間目安
+タスク
+成果物
+Ph.1
+1〜2週目
+DB設計・スクリーナーモジュール構築
+月曜自動スクリーニング稼働
+Ph.2
+2〜3週目
+価格フィード・出口ロジックエンジン
+リアルタイム監視＆アラート動作
+Ph.3
+3〜4週目
+発注連携（Alpaca API）・テスト
+ペーパートレードで動作確認
+Ph.4
+4〜5週目
+ダッシュボード UI 構築
+ブラウザでリアルタイム監視
+Ph.5
+6週目〜
+本番稼働・パラメータ最適化
+バックテスト比較・週次レポート
+9. 設定パラメータ一覧（config.yaml）
+# config.yaml
+strategy:
+crsi_buy_threshold: 10        # エントリー: ConnorsRSI < この値
+crsi_exit_threshold: 70       # RSI出口: ConnorsRSI > この値
+ma_period: 200                # トレンドフィルター: N日移動平均
+volume_multiplier: 1.5        # 出来高フィルター倍率
+max_hold_days: 5              # 最大保有日数
+exit:
+stop_loss_pct: -0.08          # ストップロス: -8%
+atr_multiplier: 2.0           # 目標価格: ATR × この倍率
+min_target_pct: 0.02          # 最小目標: +2%
+max_target_pct: 0.08          # 最大目標: +8%
+partial_exit_ratio: 0.50      # 部分利確: 50%
+monitor:
+price_check_interval_sec: 5   # 価格チェック間隔
+market_open: '09:30'          # 市場オープン時刻(ET)
+pre_close_exit: '15:55'       # 引け前 RSI チェック時刻
+alerts:
+line_token: 'YOUR_TOKEN'
+slack_webhook: 'YOUR_WEBHOOK'
+10. トレード分析モジュール（勝ち負け分析）
+統計的な手法のみを用いて（AI不使用）、勝ちトレード・負けトレードのパターンを自動分析する。毎週末にレポートを生成し、戦略の改善に役立てる。
+10.1 分析指標一覧
+カテゴリ
+指標名
+説明
+基本成績
+勝率（Win Rate）
+全クローズトレードのうち利益が出た割合
+基本成績
+期待値（Expected Value）
+平均利益 × 勝率 − 平均損失 × 敗率
+基本成績
+プロフィットファクター
+総利益 ÷ 総損失（1.5以上が目安）
+保有分析
+平均保有日数（勝ち）
+利益トレードの平均保有期間
+保有分析
+平均保有日数（負け）
+損失トレードの平均保有期間
+出口分析
+出口理由別 勝率
+損切り/RSI/価格アラート/日中目標 ごとの勝率
+CRSI分析
+エントリー時CRSI分布
+買いシグナル時のConnorsRSI値と結果の相関
+価格帯分析
+騰落率分布
+終値騰落率のヒストグラム（勝ち/負け別）
+200MA分析
+200MA乖離率
+エントリー時の200MAからの乖離率と勝率の関係
+曜日・季節
+曜日別勝率
+月〜金 各曜日のエントリー結果分布
+10.2 分析エンジン実装
+# analysis/trade_analyzer.py
+import pandas as pd
+import sqlite3
+from dataclasses import dataclass
+class TradeAnalyzer:
+def __init__(self, db_path: str):
+self.conn = sqlite3.connect(db_path)
+def load_closed_trades(self) -> pd.DataFrame:
+query = '''
+SELECT symbol, entry_price, exit_price, entry_date, exit_date,
+exit_reason, crsi_at_entry, shares,
+(exit_price - entry_price) / entry_price AS return_pct,
+(exit_price - entry_price) * shares AS pnl
+FROM watchlist WHERE status = 'CLOSED'
+'''
+return pd.read_sql(query, self.conn)
+def summary_stats(self, df: pd.DataFrame) -> dict:
+wins = df[df['pnl'] > 0]
+losses = df[df['pnl'] <= 0]
+return {
+'total_trades'    : len(df),
+'win_rate'        : len(wins) / len(df) * 100,
+'avg_win_pct'     : wins['return_pct'].mean() * 100,
+'avg_loss_pct'    : losses['return_pct'].mean() * 100,
+'profit_factor'   : wins['pnl'].sum() / abs(losses['pnl'].sum()),
+'expected_value'  : df['pnl'].mean(),
+'avg_hold_days_w' : (wins['exit_date'] - wins['entry_date']).dt.days.mean(),
+'avg_hold_days_l' : (losses['exit_date'] - losses['entry_date']).dt.days.mean(),
+}
+def exit_reason_breakdown(self, df: pd.DataFrame) -> pd.DataFrame:
+"""出口理由ごとの勝率・平均リターン分析"""
+return df.groupby('exit_reason').agg(
+count    = ('pnl', 'count'),
+win_rate = ('pnl', lambda x: (x > 0).mean() * 100),
+avg_pnl  = ('pnl', 'mean'),
+avg_ret  = ('return_pct', lambda x: x.mean() * 100)
+).round(2)
+def crsi_bucket_analysis(self, df: pd.DataFrame) -> pd.DataFrame:
+"""エントリー時ConnorsRSI値を0-2/2-5/5-10にバケット分割して勝率比較"""
+df['crsi_bucket'] = pd.cut(df['crsi_at_entry'], bins=[0,2,5,10],
+labels=['0-2','2-5','5-10'])
+return df.groupby('crsi_bucket').agg(
+count    = ('pnl','count'),
+win_rate = ('pnl', lambda x: (x>0).mean()*100),
+avg_ret  = ('return_pct', lambda x: x.mean()*100)
+).round(2)
+10.3 週次レポート出力仕様
+毎週日曜 18:00 に自動生成。Slack/LINE で通知 + HTML レポートをダッシュボードに掲載。
+レポート項目
+内容
+グラフ種別
+週間サマリー
+勝率・PF・期待値・総損益
+KPIカード
+出口理由内訳
+損切り/RSI出口/手動/自動 の件数と勝率
+積み上げ棒グラフ
+CRSI分布 vs 結果
+エントリー時CRSI値ごとの勝率ヒートマップ
+ヒートマップ
+騰落率分布
+勝ち/負けトレードのリターン分布比較
+ヒストグラム（重ね）
+200MA乖離率分析
+乖離率別の勝率散布図
+散布図
+保有日数 vs リターン
+保有期間と最終リターンの相関
+散布図＋回帰線
+負けトレード詳細
+損切り銘柄リスト・理由・CRSI値
+テーブル
+パラメータ提案
+閾値変更の統計的根拠（記述統計のみ）
+比較テーブル
+10.4 ダッシュボード 分析タブ
+勝ちトレード / 負けトレード をタブ切り替えで一覧表示
+出口理由でフィルタリング可能（損切り / RSI出口 / 手動判断 / 自動目標）
+期間指定（直近1ヶ月 / 3ヶ月 / 全期間）
+ConnorsRSI エントリー値の最適閾値を統計的に逆算表示
+価格上昇アラート（+2/3/4%）での手動売り結果を専用タブで追跡
+11. 技術スタック・依存関係
+カテゴリ
+ライブラリ/ツール
+用途
+スクレイピング
+Playwright, BeautifulSoup
+TradingView自動操作
+価格データ
+alpaca-trade-api, websockets
+リアルタイム株価受信
+DB
+SQLite（開発）/ PostgreSQL（本番）
+データ永続化
+非同期処理
+asyncio, aiohttp
+並列監視ループ
+数値計算
+pandas, numpy, ta-lib
+RSI・ATR・指標計算
+スケジューラー
+APScheduler / cron
+月曜朝自動起動
+フロントエンド
+Next.js, Tailwind, Recharts
+ダッシュボード UI
+通知
+LINE Notify API, Slack Webhook
+アラート送信
+開発環境
+Cursor + Python 3.11+, Node 18+
+コード作成・管理
+ConnorsRSI(2) 自動監視システム 設計書 v1.0  ―  Cursor にてコーディング開始可能
